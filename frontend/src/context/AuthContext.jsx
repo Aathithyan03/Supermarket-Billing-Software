@@ -5,8 +5,16 @@ const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
-    const stored = localStorage.getItem('user');
-    return stored ? JSON.parse(stored) : null;
+    try {
+      const stored = localStorage.getItem('user');
+      if (!stored || stored === 'undefined') return null;
+      return JSON.parse(stored);
+    } catch {
+      // Corrupted localStorage value from a previous session — clear it and start fresh
+      localStorage.removeItem('user');
+      localStorage.removeItem('token');
+      return null;
+    }
   });
   const [loading, setLoading] = useState(false);
 
@@ -14,6 +22,9 @@ export function AuthProvider({ children }) {
     setLoading(true);
     try {
       const { data } = await api.post('/auth/login', { username, password });
+      if (!data?.token || !data?.user) {
+        throw new Error('Unexpected response from server.');
+      }
       localStorage.setItem('token', data.token);
       localStorage.setItem('user', JSON.stringify(data.user));
       setUser(data.user);
