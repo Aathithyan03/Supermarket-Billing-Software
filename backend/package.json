@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node src/server.js",
+    "start": "node src/utils/server.js",
+    "dev": "node src/utils/server.js",
     "migrate": "node src/database/migrate.js",
     "test": "jest --runInBand"
   },
@@ -25,8 +25,7 @@
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.11.0",
     "node-sqlite3-wasm": "^0.8.58",
-    "pdfkit": "^0.19.1",
-    "supermarket-billing-software": "file:.."
+    "pdfkit": "^0.19.1"
   },
   "devDependencies": {
     "jest": "^30.4.2",
