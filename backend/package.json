@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node src/utils/server.js",
-    "dev": "node src/utils/server.js",
+     "start": "node src/server.js",
+    "dev": "node src/server.js",
     "migrate": "node src/database/migrate.js",
     "test": "jest --runInBand"
   },
