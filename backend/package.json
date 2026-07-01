@@ -2,11 +2,10 @@
   "name": "backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "src/server.js",
   "scripts": {
      "start": "node src/server.js",
-    "dev": "node src/server.js",
-    "migrate": "node src/database/migrate.js",
+    "dev": "nodemon src/server.js",
     "test": "jest --runInBand"
   },
   "keywords": [],
@@ -24,7 +23,7 @@
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.11.0",
-    "node-sqlite3-wasm": "^0.8.58",
+    "mysql2": "^3.6.0",
     "pdfkit": "^0.19.1"
   },
   "devDependencies": {

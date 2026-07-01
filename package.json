@@ -12,5 +12,11 @@
     "setup": "npm run install:all && npm run build:frontend && npm run migrate",
     "dev:backend": "npm run dev --prefix backend",
     "dev:frontend": "npm run dev --prefix frontend"
+  },
+  "dependencies": {
+    "mysql2": "^3.22.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
   }
 }

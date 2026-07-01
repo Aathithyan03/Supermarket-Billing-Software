@@ -1,30 +1,49 @@
 /**
- * Centralized error handler. Any route that calls next(err), or any thrown
- * error in an async route wrapped by asyncHandler, lands here.
+ * Centralized error handler.
  */
 function errorHandler(err, req, res, next) {
   if (process.env.NODE_ENV !== 'test') {
-    console.error(`[ERROR] ${req.method} ${req.originalUrl} ::`, err.message);
+    console.error(`[ERROR] ${req.method} ${req.originalUrl} ::`, err);
   }
 
-  // SQLite constraint violations -> friendly 400s instead of opaque 500s
-  if (err.message && err.message.includes('UNIQUE constraint failed')) {
-    return res.status(409).json({ error: 'A record with this value already exists (duplicate barcode, phone, or username).' });
+  // MySQL constraint violations
+  if (err.code === 'ER_DUP_ENTRY') {
+    return res.status(409).json({
+      error: 'A record with this value already exists.'
+    });
   }
-  if (err.message && err.message.includes('FOREIGN KEY constraint failed')) {
-    return res.status(400).json({ error: 'This action references a record that does not exist or is in use.' });
+
+  if (err.code === 'ER_NO_REFERENCED_ROW_2') {
+    return res.status(400).json({
+      error: 'Referenced record does not exist.'
+    });
   }
-  if (err.message && err.message.includes('CHECK constraint failed')) {
-    return res.status(400).json({ error: 'One of the submitted values is invalid (check quantities, prices, or roles).' });
+
+  if (err.code === 'ER_ROW_IS_REFERENCED_2') {
+    return res.status(400).json({
+      error: 'This record is being used elsewhere and cannot be deleted.'
+    });
+  }
+
+  if (err.code === 'ER_CHECK_CONSTRAINT_VIOLATED') {
+    return res.status(400).json({
+      error: 'One of the submitted values is invalid.'
+    });
   }
 
   const status = err.status || 500;
-  res.status(status).json({ error: err.message || 'An unexpected error occurred.' });
+
+  res.status(status).json({
+    error: err.message || 'Internal Server Error'
+  });
 }
 
-/** Wraps an async route handler so thrown errors/rejections reach errorHandler. */
+/**
+ * Wrap async routes
+ */
 function asyncHandler(fn) {
-  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+  return (req, res, next) =>
+    Promise.resolve(fn(req, res, next)).catch(next);
 }
 
 class AppError extends Error {
@@ -34,4 +53,8 @@ class AppError extends Error {
   }
 }
 
-module.exports = { errorHandler, asyncHandler, AppError };
+module.exports = {
+  errorHandler,
+  asyncHandler,
+  AppError
+};

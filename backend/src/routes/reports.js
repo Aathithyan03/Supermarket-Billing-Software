@@ -1,7 +1,7 @@
 const express = require('express');
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
-const { get, all } = require('../database/db');
+const db = require('../database/db');
 const { authenticate, requireRole } = require('../middleware/auth');
 const { asyncHandler, AppError } = require('../middleware/errorHandler');
 
@@ -24,106 +24,236 @@ function dateRangeFor(period, from, to) {
   return { from: start, to: end };
 }
 
-function buildSalesReport(from, to) {
-  const summary = get(
-    `SELECT COALESCE(SUM(total_amount),0) as revenue, COALESCE(SUM(tax_amount),0) as tax,
-            COALESCE(SUM(discount_amount),0) as discount, COUNT(*) as bill_count
-     FROM bills WHERE date(created_at) BETWEEN date(?) AND date(?)`,
-    [from, to]
-  );
+async function buildSalesReport(from, to) {
 
-  const profitRow = get(
-    `SELECT COALESCE(SUM((bi.unit_price - bi.cost_price) * bi.quantity), 0) as gross_profit,
-            COALESCE(SUM(bi.cost_price * bi.quantity), 0) as total_cost
-     FROM bill_items bi
-     JOIN bills b ON b.id = bi.bill_id
-     WHERE date(b.created_at) BETWEEN date(?) AND date(?)`,
-    [from, to]
-  );
+    const [summaryRows] = await db.query(
+        `SELECT
+            COALESCE(SUM(total_amount),0) AS revenue,
+            COALESCE(SUM(tax_amount),0) AS tax,
+            COALESCE(SUM(discount_amount),0) AS discount,
+            COUNT(*) AS bill_count
+        FROM bills
+        WHERE DATE(created_at) BETWEEN ? AND ?`,
+        [from, to]
+    );
 
-  const dailyBreakdown = all(
-    `SELECT date(created_at) as day, COALESCE(SUM(total_amount),0) as revenue, COUNT(*) as bill_count
-     FROM bills WHERE date(created_at) BETWEEN date(?) AND date(?)
-     GROUP BY date(created_at) ORDER BY day ASC`,
-    [from, to]
-  );
+    const summary = summaryRows[0];
 
-  const bestSellers = all(
-    `SELECT bi.product_name, SUM(bi.quantity) as units_sold,
-            SUM(bi.line_total) as revenue,
-            SUM((bi.unit_price - bi.cost_price) * bi.quantity) as profit
-     FROM bill_items bi
-     JOIN bills b ON b.id = bi.bill_id
-     WHERE date(b.created_at) BETWEEN date(?) AND date(?)
-     GROUP BY bi.product_name
-     ORDER BY units_sold DESC
-     LIMIT 10`,
-    [from, to]
-  );
+    const [profitRows] = await db.query(
+        `SELECT
+            COALESCE(SUM((bi.unit_price-bi.cost_price)*bi.quantity),0) AS gross_profit,
+            COALESCE(SUM(bi.cost_price*bi.quantity),0) AS total_cost
+        FROM bill_items bi
+        JOIN bills b
+        ON b.id=bi.bill_id
+        WHERE DATE(b.created_at) BETWEEN ? AND ?`,
+        [from, to]
+    );
 
-  const paymentBreakdown = all(
-    `SELECT payment_method, COUNT(*) as count, COALESCE(SUM(total_amount),0) as total
-     FROM bills WHERE date(created_at) BETWEEN date(?) AND date(?)
-     GROUP BY payment_method`,
-    [from, to]
-  );
+    const profit = profitRows[0];
 
-  return {
-    period: { from, to },
-    revenue: summary.revenue,
-    tax_collected: summary.tax,
-    discount_given: summary.discount,
-    bill_count: summary.bill_count,
-    gross_profit: profitRow.gross_profit,
-    total_cost: profitRow.total_cost,
-    profit_margin_percent: summary.revenue > 0 ? Number(((profitRow.gross_profit / summary.revenue) * 100).toFixed(2)) : 0,
-    daily_breakdown: dailyBreakdown,
-    best_sellers: bestSellers,
-    payment_breakdown: paymentBreakdown,
-  };
+    const [dailyBreakdown] = await db.query(
+        `SELECT
+            DATE(created_at) AS day,
+            COALESCE(SUM(total_amount),0) AS revenue,
+            COUNT(*) AS bill_count
+        FROM bills
+        WHERE DATE(created_at) BETWEEN ? AND ?
+        GROUP BY DATE(created_at)
+        ORDER BY day`,
+        [from, to]
+    );
+
+    const [bestSellers] = await db.query(
+        `SELECT
+            bi.product_name,
+            SUM(bi.quantity) AS units_sold,
+            SUM(bi.line_total) AS revenue,
+            SUM((bi.unit_price-bi.cost_price)*bi.quantity) AS profit
+        FROM bill_items bi
+        JOIN bills b
+        ON b.id=bi.bill_id
+        WHERE DATE(b.created_at) BETWEEN ? AND ?
+        GROUP BY bi.product_name
+        ORDER BY units_sold DESC
+        LIMIT 10`,
+        [from, to]
+    );
+
+    const [paymentBreakdown] = await db.query(
+        `SELECT
+            payment_method,
+            COUNT(*) AS count,
+            COALESCE(SUM(total_amount),0) AS total
+        FROM bills
+        WHERE DATE(created_at) BETWEEN ? AND ?
+        GROUP BY payment_method`,
+        [from, to]
+    );
+
+    return {
+        period: { from, to },
+        revenue: summary.revenue,
+        tax_collected: summary.tax,
+        discount_given: summary.discount,
+        bill_count: summary.bill_count,
+        gross_profit: profit.gross_profit,
+        total_cost: profit.total_cost,
+        profit_margin_percent:
+            summary.revenue > 0
+                ? Number(
+                      ((profit.gross_profit / summary.revenue) * 100).toFixed(2)
+                  )
+                : 0,
+        daily_breakdown: dailyBreakdown,
+        best_sellers: bestSellers,
+        payment_breakdown: paymentBreakdown,
+    };
 }
 
-// GET /api/reports/sales?period=daily|weekly|monthly  OR  ?from=&to=
-router.get('/sales', authenticate, (req, res) => {
-  const { period = 'daily', from, to } = req.query;
-  const range = dateRangeFor(period, from, to);
-  res.json(buildSalesReport(range.from, range.to));
-});
+router.get(
+    '/sales',
+    authenticate,
+    asyncHandler(async (req, res) => {
 
-// GET /api/reports/best-sellers?from=&to=&limit=
-router.get('/best-sellers', authenticate, (req, res) => {
-  const { from, to, limit = 10 } = req.query;
-  const range = dateRangeFor('monthly', from, to);
-  const rows = all(
-    `SELECT bi.product_name, SUM(bi.quantity) as units_sold, SUM(bi.line_total) as revenue
-     FROM bill_items bi JOIN bills b ON b.id = bi.bill_id
-     WHERE date(b.created_at) BETWEEN date(?) AND date(?)
-     GROUP BY bi.product_name ORDER BY units_sold DESC LIMIT ?`,
-    [range.from, range.to, Number(limit)]
-  );
-  res.json({ period: range, best_sellers: rows });
-});
+        const {
+            period = 'daily',
+            from,
+            to
+        } = req.query;
 
-// GET /api/reports/profit?from=&to=
-router.get('/profit', authenticate, requireRole('admin'), (req, res) => {
-  const { from, to, period = 'monthly' } = req.query;
-  const range = dateRangeFor(period, from, to);
-  const report = buildSalesReport(range.from, range.to);
-  res.json({
-    period: range,
-    revenue: report.revenue,
-    total_cost: report.total_cost,
-    gross_profit: report.gross_profit,
-    profit_margin_percent: report.profit_margin_percent,
-    by_product: report.best_sellers,
-  });
-});
+        const range = dateRangeFor(period, from, to);
+
+        const report = await buildSalesReport(
+            range.from,
+            range.to
+        );
+
+        res.json(report);
+
+    })
+);
+
+router.get(
+    '/best-sellers',
+    authenticate,
+    asyncHandler(async (req, res) => {
+
+        const {
+            from,
+            to,
+            limit = 10
+        } = req.query;
+
+        const range = dateRangeFor(
+            'monthly',
+            from,
+            to
+        );
+
+        const [rows] = await db.query(
+
+            `SELECT
+                bi.product_name,
+                SUM(bi.quantity) AS units_sold,
+                SUM(bi.line_total) AS revenue
+            FROM bill_items bi
+            JOIN bills b
+                ON b.id = bi.bill_id
+            WHERE DATE(b.created_at) BETWEEN ? AND ?
+            GROUP BY bi.product_name
+            ORDER BY units_sold DESC
+            LIMIT ?`,
+
+            [
+                range.from,
+                range.to,
+                Number(limit)
+            ]
+
+        );
+
+        res.json({
+            period: range,
+            best_sellers: rows
+        });
+
+    })
+);
+
+router.get(
+    '/profit',
+    authenticate,
+    requireRole('admin'),
+    asyncHandler(async (req, res) => {
+
+        const {
+            from,
+            to,
+            period = 'monthly'
+        } = req.query;
+
+        const range = dateRangeFor(
+            period,
+            from,
+            to
+        );
+
+        const report = await buildSalesReport(
+            range.from,
+            range.to
+        );
+
+        res.json({
+            period: range,
+            revenue: report.revenue,
+            total_cost: report.total_cost,
+            gross_profit: report.gross_profit,
+            profit_margin_percent: report.profit_margin_percent,
+            by_product: report.best_sellers
+        });
+
+    })
+);router.get(
+    '/profit',
+    authenticate,
+    requireRole('admin'),
+    asyncHandler(async (req, res) => {
+
+        const {
+            from,
+            to,
+            period = 'monthly'
+        } = req.query;
+
+        const range = dateRangeFor(
+            period,
+            from,
+            to
+        );
+
+        const report = await buildSalesReport(
+            range.from,
+            range.to
+        );
+
+        res.json({
+            period: range,
+            revenue: report.revenue,
+            total_cost: report.total_cost,
+            gross_profit: report.gross_profit,
+            profit_margin_percent: report.profit_margin_percent,
+            by_product: report.best_sellers
+        });
+
+    })
+);
 
 // GET /api/reports/export/excel?period=&from=&to=
 router.get('/export/excel', authenticate, requireRole('admin', 'staff'), asyncHandler(async (req, res) => {
   const { period = 'monthly', from, to } = req.query;
   const range = dateRangeFor(period, from, to);
-  const report = buildSalesReport(range.from, range.to);
+  const report = await buildSalesReport(range.from, range.to);
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Supermarket Billing Software';
@@ -170,11 +300,25 @@ router.get('/export/excel', authenticate, requireRole('admin', 'staff'), asyncHa
 router.get('/export/pdf', authenticate, requireRole('admin', 'staff'), asyncHandler(async (req, res) => {
   const { period = 'monthly', from, to } = req.query;
   const range = dateRangeFor(period, from, to);
-  const report = buildSalesReport(range.from, range.to);
+  const report = await buildSalesReport(range.from, range.to);
 
-  const storeRow = get("SELECT value FROM settings WHERE key = 'store_name'");
-  const currencyRow = get("SELECT value FROM settings WHERE key = 'currency_symbol'");
-  const currency = currencyRow ? currencyRow.value : 'Rs.';
+const [storeRows] = await db.query(
+    "SELECT value FROM settings WHERE `key`='store_name'"
+);
+
+const [currencyRows] = await db.query(
+    "SELECT value FROM settings WHERE `key`='currency_symbol'"
+);
+
+const storeName =
+    storeRows.length > 0
+        ? storeRows[0].value
+        : "Supermarket";
+
+const currency =
+    currencyRows.length > 0
+        ? currencyRows[0].value
+        : "Rs.";
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="sales-report-${range.from}-to-${range.to}.pdf"`);
@@ -182,7 +326,7 @@ router.get('/export/pdf', authenticate, requireRole('admin', 'staff'), asyncHand
   const doc = new PDFDocument({ margin: 40 });
   doc.pipe(res);
 
-  doc.fontSize(18).text(storeRow ? storeRow.value : 'Supermarket', { align: 'center' });
+  doc.fontSize(18).text(storeName, { align: 'center' });
   doc.fontSize(12).text('Sales Report', { align: 'center' });
   doc.fontSize(10).text(`Period: ${range.from} to ${range.to}`, { align: 'center' });
   doc.moveDown(1);

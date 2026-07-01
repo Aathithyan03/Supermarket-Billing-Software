@@ -9,7 +9,15 @@ const { errorHandler } = require('./middleware/errorHandler');
 
 const authRoutes = require('./routes/auth');
 const productRoutes = require('./routes/products');
-const billRoutes = require('./routes/bills');
+let billRoutes;
+
+try {
+    billRoutes = require('./routes/bills');
+    console.log("Bills route loaded successfully");
+} catch (err) {
+    console.error("Bills route failed to load");
+    console.error(err);
+}
 const customerRoutes = require('./routes/customers');
 const inventoryRoutes = require('./routes/inventory');
 const dashboardRoutes = require('./routes/dashboard');
@@ -64,6 +72,17 @@ app.use('/api', apiLimiter);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
+});
+
+console.log({
+  authRoutes,
+  productRoutes,
+  billRoutes,
+  customerRoutes,
+  inventoryRoutes,
+  dashboardRoutes,
+  reportRoutes,
+  settingsRoutes
 });
 
 app.use('/api/auth', authRoutes);

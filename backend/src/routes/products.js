@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { run, get, all, transaction } = require('../database/db');
+const db = require('../database/db');
 const { authenticate, requireRole } = require('../middleware/auth');
 const { asyncHandler, AppError } = require('../middleware/errorHandler');
 
@@ -19,54 +19,114 @@ const PRODUCT_SELECT = `
 `;
 
 // GET /api/products  ?search=&category_id=&low_stock=1&page=&limit=
-router.get('/', authenticate, (req, res) => {
-  const { search, category_id, low_stock, barcode, page = 1, limit = 50, active_only } = req.query;
-  const clauses = [];
-  const params = [];
+router.get(
+  '/',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const {
+      search,
+      category_id,
+      low_stock,
+      barcode,
+      page = 1,
+      limit = 50,
+      active_only,
+    } = req.query;
 
-  if (active_only !== 'false') {
-    clauses.push('p.is_active = 1');
-  }
-  if (search) {
-    clauses.push('(p.name LIKE ? OR p.barcode LIKE ?)');
-    params.push(`%${search}%`, `%${search}%`);
-  }
-  if (barcode) {
-    clauses.push('p.barcode = ?');
-    params.push(barcode);
-  }
-  if (category_id) {
-    clauses.push('p.category_id = ?');
-    params.push(category_id);
-  }
-  if (low_stock === 'true') {
-    clauses.push('p.quantity <= p.low_stock_threshold');
-  }
+    const clauses = [];
+    const params = [];
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const offset = (Number(page) - 1) * Number(limit);
+    if (active_only !== 'false') {
+      clauses.push('p.is_active = 1');
+    }
 
-  const totalRow = get(`SELECT COUNT(*) as c FROM products p ${where}`, params);
-  const products = all(
-    `${PRODUCT_SELECT} ${where} ORDER BY p.name ASC LIMIT ? OFFSET ?`,
-    [...params, Number(limit), offset]
-  );
+    if (search) {
+      clauses.push('(p.name LIKE ? OR p.barcode LIKE ?)');
+      params.push(`%${search}%`, `%${search}%`);
+    }
 
-  res.json({ products, total: totalRow.c, page: Number(page), limit: Number(limit) });
-});
+    if (barcode) {
+      clauses.push('p.barcode = ?');
+      params.push(barcode);
+    }
+
+    if (category_id) {
+      clauses.push('p.category_id = ?');
+      params.push(category_id);
+    }
+
+    if (low_stock === 'true') {
+      clauses.push('p.quantity <= p.low_stock_threshold');
+    }
+
+    const where = clauses.length
+      ? `WHERE ${clauses.join(' AND ')}`
+      : '';
+
+    const offset = (Number(page) - 1) * Number(limit);
+
+    const [countRows] = await db.query(
+      `SELECT COUNT(*) AS c FROM products p ${where}`,
+      params
+    );
+
+    const [products] = await db.query(
+      `${PRODUCT_SELECT}
+      ${where}
+      ORDER BY p.name ASC
+      LIMIT ?
+      OFFSET ?`,
+      [...params, Number(limit), offset]
+    );
+
+    res.json({
+      products,
+      total: countRows[0].c,
+      page: Number(page),
+      limit: Number(limit),
+    });
+  })
+);
 
 // GET /api/products/low-stock
-router.get('/low-stock', authenticate, (req, res) => {
-  const products = all(`${PRODUCT_SELECT} WHERE p.is_active = 1 AND p.quantity <= p.low_stock_threshold ORDER BY p.quantity ASC`);
-  res.json({ products });
-});
+router.get(
+  '/low-stock',
+  authenticate,
+  asyncHandler(async (req, res) => {
+
+    const [products] = await db.query(
+      `${PRODUCT_SELECT}
+       WHERE p.is_active = 1
+       AND p.quantity <= p.low_stock_threshold
+       ORDER BY p.quantity ASC`
+    );
+
+    res.json({ products });
+
+  })
+);
 
 // GET /api/products/:id
-router.get('/:id', authenticate, (req, res) => {
-  const product = get(`${PRODUCT_SELECT} WHERE p.id = ?`, [req.params.id]);
-  if (!product) throw new AppError('Product not found.', 404);
-  res.json({ product });
-});
+router.get(
+  '/:id',
+  authenticate,
+  asyncHandler(async (req, res) => {
+
+    const [rows] = await db.query(
+      `${PRODUCT_SELECT} WHERE p.id = ?`,
+      [req.params.id]
+    );
+
+    if (rows.length === 0) {
+      throw new AppError('Product not found.', 404);
+    }
+
+    res.json({
+      product: rows[0],
+    });
+
+  })
+);
 
 // POST /api/products
 router.post(
@@ -81,27 +141,72 @@ router.post(
   ],
   asyncHandler(async (req, res) => {
     validate(req);
+
     const {
-      name, category_id, barcode, price, cost_price = 0, tax_percent = 0,
-      quantity = 0, unit = 'pcs', low_stock_threshold = 10,
+      name,
+      category_id,
+      barcode,
+      price,
+      cost_price = 0,
+      tax_percent = 0,
+      quantity = 0,
+      unit = 'pcs',
+      low_stock_threshold = 10,
     } = req.body;
 
-    const result = transaction(() => {
-      const insertResult = run(
-        `INSERT INTO products (name, category_id, barcode, price, cost_price, tax_percent, quantity, unit, low_stock_threshold)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [name, category_id || null, barcode || null, price, cost_price, tax_percent, quantity, unit, low_stock_threshold]
+    const connection = await db.getConnection();
+
+    try {
+      await connection.beginTransaction();
+
+      const [result] = await connection.query(
+        `INSERT INTO products
+        (name, category_id, barcode, price, cost_price,
+         tax_percent, quantity, unit, low_stock_threshold)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          name,
+          category_id || null,
+          barcode || null,
+          price,
+          cost_price,
+          tax_percent,
+          quantity,
+          unit,
+          low_stock_threshold,
+        ]
       );
+
       if (Number(quantity) > 0) {
-        run(
-          `INSERT INTO stock_movements (product_id, type, quantity, reason, user_id) VALUES (?, 'in', ?, 'Initial stock', ?)`,
-          [insertResult.lastInsertRowid, quantity, req.user.id]
+        await connection.query(
+          `INSERT INTO stock_movements
+          (product_id, type, quantity, reason, user_id)
+          VALUES (?, 'in', ?, 'Initial stock', ?)`,
+          [
+            result.insertId,
+            quantity,
+            req.user.id,
+          ]
         );
       }
-      return insertResult;
-    });
 
-    res.status(201).json({ id: result.lastInsertRowid, message: 'Product added successfully.' });
+      await connection.commit();
+
+      res.status(201).json({
+        id: result.insertId,
+        message: 'Product added successfully.',
+      });
+
+    } catch (err) {
+
+      await connection.rollback();
+      throw err;
+
+    } finally {
+
+      connection.release();
+
+    }
   })
 );
 
@@ -116,26 +221,60 @@ router.put(
   ],
   asyncHandler(async (req, res) => {
     validate(req);
+
     const { id } = req.params;
-    const existing = get('SELECT * FROM products WHERE id = ?', [id]);
-    if (!existing) throw new AppError('Product not found.', 404);
+
+    const [rows] = await db.query(
+      'SELECT * FROM products WHERE id = ?',
+      [id]
+    );
+
+    if (rows.length === 0) {
+      throw new AppError('Product not found.', 404);
+    }
+
+    const existing = rows[0];
 
     const {
-      name, category_id, barcode, price, cost_price, tax_percent,
-      unit, low_stock_threshold,
+      name,
+      category_id,
+      barcode,
+      price,
+      cost_price,
+      tax_percent,
+      unit,
+      low_stock_threshold,
     } = req.body;
 
-    run(
-      `UPDATE products SET name=?, category_id=?, barcode=?, price=?, cost_price=?, tax_percent=?,
-       unit=?, low_stock_threshold=?, updated_at=datetime('now') WHERE id=?`,
+    await db.query(
+      `UPDATE products
+       SET
+       name=?,
+       category_id=?,
+       barcode=?,
+       price=?,
+       cost_price=?,
+       tax_percent=?,
+       unit=?,
+       low_stock_threshold=?,
+       updated_at=NOW()
+       WHERE id=?`,
       [
-        name, category_id || null, barcode || null, price,
-        cost_price ?? existing.cost_price, tax_percent ?? existing.tax_percent,
-        unit || existing.unit, low_stock_threshold ?? existing.low_stock_threshold, id,
+        name,
+        category_id || null,
+        barcode || null,
+        price,
+        cost_price ?? existing.cost_price,
+        tax_percent ?? existing.tax_percent,
+        unit || existing.unit,
+        low_stock_threshold ?? existing.low_stock_threshold,
+        id,
       ]
     );
 
-    res.json({ message: 'Product updated successfully.' });
+    res.json({
+      message: 'Product updated successfully.',
+    });
   })
 );
 
@@ -145,60 +284,153 @@ router.patch(
   authenticate,
   requireRole('admin', 'staff'),
   [
-    body('type').isIn(['in', 'out', 'adjustment']).withMessage('Type must be in, out, or adjustment.'),
-    body('quantity').isInt({ min: 1 }).withMessage('Quantity must be a positive integer.'),
+    body('type')
+      .isIn(['in', 'out', 'adjustment'])
+      .withMessage('Type must be in, out, or adjustment.'),
+    body('quantity')
+      .isInt({ min: 1 })
+      .withMessage('Quantity must be a positive integer.'),
   ],
   asyncHandler(async (req, res) => {
+
     validate(req);
+
     const { id } = req.params;
     const { type, quantity, reason } = req.body;
 
-    const product = get('SELECT * FROM products WHERE id = ?', [id]);
-    if (!product) throw new AppError('Product not found.', 404);
+    const connection = await db.getConnection();
 
-    let newQuantity = product.quantity;
-    if (type === 'in') newQuantity += Number(quantity);
-    else if (type === 'out') newQuantity -= Number(quantity);
-    else newQuantity = Number(quantity); // adjustment sets absolute value
+    try {
 
-    if (newQuantity < 0) throw new AppError('Stock cannot go below zero.', 400);
+      await connection.beginTransaction();
 
-    transaction(() => {
-      run(`UPDATE products SET quantity = ?, updated_at = datetime('now') WHERE id = ?`, [newQuantity, id]);
-      run(
-        `INSERT INTO stock_movements (product_id, type, quantity, reason, user_id) VALUES (?, ?, ?, ?, ?)`,
-        [id, type, quantity, reason || null, req.user.id]
+      const [rows] = await connection.query(
+        'SELECT * FROM products WHERE id=?',
+        [id]
       );
-    });
 
-    res.json({ message: 'Stock updated successfully.', new_quantity: newQuantity });
+      if (rows.length === 0) {
+        throw new AppError('Product not found.',404);
+      }
+
+      const product = rows[0];
+
+      let newQuantity = product.quantity;
+
+      if(type==='in')
+          newQuantity += Number(quantity);
+      else if(type==='out')
+          newQuantity -= Number(quantity);
+      else
+          newQuantity = Number(quantity);
+
+      if(newQuantity<0){
+          throw new AppError('Stock cannot go below zero.',400);
+      }
+
+      await connection.query(
+        'UPDATE products SET quantity=?,updated_at=NOW() WHERE id=?',
+        [newQuantity,id]
+      );
+
+      await connection.query(
+        `INSERT INTO stock_movements
+        (product_id,type,quantity,reason,user_id)
+        VALUES(?,?,?,?,?)`,
+        [
+            id,
+            type,
+            quantity,
+            reason || null,
+            req.user.id
+        ]
+      );
+
+      await connection.commit();
+
+      res.json({
+          message:'Stock updated successfully.',
+          new_quantity:newQuantity
+      });
+
+    }catch(err){
+
+        await connection.rollback();
+        throw err;
+
+    }finally{
+
+        connection.release();
+
+    }
+
   })
 );
 
 // DELETE /api/products/:id  (soft delete to preserve bill history integrity)
-router.delete('/:id', authenticate, requireRole('admin'), asyncHandler(async (req, res) => {
-  const existing = get('SELECT id FROM products WHERE id = ?', [req.params.id]);
-  if (!existing) throw new AppError('Product not found.', 404);
-  run('UPDATE products SET is_active = 0 WHERE id = ?', [req.params.id]);
-  res.json({ message: 'Product removed.' });
-}));
+router.delete(
+  '/:id',
+  authenticate,
+  requireRole('admin'),
+  asyncHandler(async(req,res)=>{
+
+      const [rows] = await db.query(
+          'SELECT id FROM products WHERE id=?',
+          [req.params.id]
+      );
+
+      if(rows.length===0){
+          throw new AppError('Product not found.',404);
+      }
+
+      await db.query(
+          'UPDATE products SET is_active=0 WHERE id=?',
+          [req.params.id]
+      );
+
+      res.json({
+          message:'Product removed.'
+      });
+
+  })
+);
 
 // ---- Categories ----
-router.get('/categories/all', authenticate, (req, res) => {
-  const categories = all('SELECT * FROM categories ORDER BY name ASC');
-  res.json({ categories });
-});
+router.get(
+'/categories/all',
+authenticate,
+asyncHandler(async(req,res)=>{
+
+    const [categories] = await db.query(
+        'SELECT * FROM categories ORDER BY name ASC'
+    );
+
+    res.json({categories});
+
+})
+);
 
 router.post(
-  '/categories',
-  authenticate,
-  requireRole('admin', 'staff'),
-  [body('name').trim().notEmpty().withMessage('Category name is required.')],
-  asyncHandler(async (req, res) => {
+'/categories',
+authenticate,
+requireRole('admin','staff'),
+[
+body('name').trim().notEmpty().withMessage('Category name is required.')
+],
+asyncHandler(async(req,res)=>{
+
     validate(req);
-    const result = run('INSERT INTO categories (name) VALUES (?)', [req.body.name]);
-    res.status(201).json({ id: result.lastInsertRowid });
-  })
+
+    const [result] = await db.query(
+        'INSERT INTO categories(name) VALUES(?)',
+        [req.body.name]
+    );
+
+    res.status(201).json({
+        id:result.insertId
+    });
+
+})
 );
 
 module.exports = router;

@@ -32,20 +32,36 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    let mounted = true;
-    api.get('/dashboard/summary')
-      .then(({ data }) => { if (mounted) setSummary(data); })
-      .catch(() => { if (mounted) setError('Could not load dashboard data.'); })
-      .finally(() => { if (mounted) setLoading(false); });
-    return () => { mounted = false; };
-  }, []);
+useEffect(() => {
+  loadDashboard();
+}, []);
+
+async function loadDashboard() {
+  try {
+    setLoading(true);
+
+    const { data } = await api.get("/dashboard/summary", {
+      headers: {
+        "Cache-Control": "no-cache",
+      },
+    });
+
+    setSummary(data);
+  } catch (err) {
+    setError("Could not load dashboard.");
+  } finally {
+    setLoading(false);
+  }
+}
 
   if (loading) {
     return <div className="text-sage-500 text-sm">Loading dashboard...</div>;
   }
   if (error) {
     return <div className="text-red-600 text-sm">{error}</div>;
+  }
+  if (!summary) {
+  return <div>Loading...</div>;
   }
 
   const change = summary.sales_percent_change;
@@ -130,3 +146,4 @@ export default function Dashboard() {
     </div>
   );
 }
+
